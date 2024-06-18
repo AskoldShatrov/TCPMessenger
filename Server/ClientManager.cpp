@@ -1,0 +1,140 @@
+/* Класс отвечает за управление сетевым соединением с клиентом, посредством получения указателя типа QTcpSocket на подключаемого клиента.       *
+ * Класс содержит методы для обработки взаимодействия с клеентом: для записи отправляемых или считывания полученных типов данных,               *
+ * заданных в перечислениях класса ChatProtocol.cpp с использованием методов данного класса. Слот readyRead() вызывается при поступлении данных *
+ * от клиента. Он декодирует данные с помощью объекта ChatProtocol, определяющим тип полученного сообщения и генерирует соответствующие сигналы,*       *
+ * которые могут быть обработаны в ClientChatWidget.                                                                                            */
+
+#include "ClientManager.h"
+
+#include <QDir>
+#include <QFileDialog>
+#include <QStandardPaths>
+#include <QFileDialog>
+#include <QCoreApplication>
+#include <QMessageBox>
+
+
+ClientManager::ClientManager(QTcpSocket *client, QObject *parent)
+    : QObject{parent},
+    _socket(client)
+{
+    setupClient();
+}
+
+void ClientManager::setupClient()
+{
+    connect(_socket, &QTcpSocket::connected, this, &ClientManager::connected);
+    connect(_socket, &QTcpSocket::disconnected, this, &ClientManager::disconnected);
+    connect(_socket, &QTcpSocket::readyRead, this, &ClientManager::readyRead);
+}
+
+void ClientManager::connectToServer()
+{
+    _socket->connectToHost(_ip, _port);
+}
+
+void ClientManager::disconnectFromHost()
+{
+    _socket->disconnectFromHost();
+}
+
+void ClientManager::sendMessage(QString message)
+{
+    _socket->write(_protocol.textMessage(message, name()));
+}
+
+void ClientManager::sendName(QString name)
+{
+    _socket->write(_protocol.setNameMessage(name));
+}
+
+void ClientManager::sendStatus(ChatProtocol::Status status)
+{
+    _socket->write(_protocol.setStatusMessage(status));
+}
+
+QString ClientManager::name() const
+{
+    auto id = _socket->property("id").toInt();
+    auto name = _protocol.name().length() > 0 ? _protocol.name() : QString("Client (%1)").arg(id);
+
+    return name;
+}
+
+void ClientManager::sendIsTyping()
+{
+    _socket->write(_protocol.isTypingMessage());
+}
+
+void ClientManager::sendInitSendingFile(QString fileName)
+{
+    _tmpFileName = fileName;
+    _socket->write(_protocol.setInitSendingFileMessage(fileName));
+}
+
+void ClientManager::sendAcceptFile()
+{
+    _socket->write(_protocol.setAcceptFileMessage());
+}
+
+void ClientManager::sendRejectFile()
+{
+    _socket->write(_protocol.setRejectFileMessage());
+}
+void ClientManager::readyRead()
+{
+    auto data = _socket->readAll();
+    _protocol.loadData(data);
+    switch (_protocol.type()) {
+    case ChatProtocol::Text:
+        emit textMessageReceived(_protocol.message(), _protocol.receiver());
+        break;
+    case ChatProtocol::SetName:{
+        auto prevName = _socket->property("clientName").toString();
+        _socket->setProperty("clientName", name());
+        emit nameChanged(prevName, name());
+        break;
+    }
+    case ChatProtocol::SetStatus:
+        emit statusChanged(_protocol.status());
+        break;
+    case ChatProtocol::IsTyping:
+        emit isTyping();
+        break;
+    case ChatProtocol::InitSendingFile:
+        emit initReceivingFile(_protocol.name(), _protocol.fileName(), _protocol.fileSize());
+        break;
+    case ChatProtocol::AcceptSendingFile:
+        sendFile();
+        break;
+    case ChatProtocol::RejectSendingFile:
+        emit rejectReceivingFile();
+        break;
+    case ChatProtocol::SendFile:
+        saveFile();
+        break;
+    default:
+        break;
+    }
+}
+
+void ClientManager::sendFile()
+{
+    _socket->write(_protocol.setFileMessage(_tmpFileName));
+}
+
+void ClientManager::saveFile()
+{
+    QDir dir;
+    dir.mkdir(name());
+    auto path = QString("%1/%2/%3_%4")
+            .arg(dir.canonicalPath(), name(), QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"), _protocol.fileName());
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(_protocol.fileData());
+        file.close();
+        emit fileSaved(path);
+    }
+}
+
+
